@@ -124,6 +124,18 @@ class QuestionnaireSerializer(serializers.ModelSerializer):
     def update(self, instance, validated_data):
         sections_data = validated_data.pop("sections", None)
 
+        if instance.status == Questionnaire.Status.PUBLISHED and sections_data is not None:
+            raise serializers.ValidationError({
+                "sections": "Published questionnaires cannot be changed. Save a new draft version instead.",
+            })
+
+        if sections_data is not None and instance.sections.filter(
+            questions__interview_responses__isnull=False
+        ).exists():
+            raise serializers.ValidationError({
+                "sections": "This questionnaire already has interview answers. Create a new questionnaire version instead of replacing its questions.",
+            })
+
         for field, value in validated_data.items():
             setattr(instance, field, value)
         instance.save()

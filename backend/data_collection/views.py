@@ -1,14 +1,19 @@
+import math
+from datetime import date
+
+from django.db import transaction
 from django.db.models import Count, DateTimeField
 from django.core.exceptions import ValidationError
 from django.utils import timezone
 from rest_framework.permissions import IsAuthenticated
+from rest_framework.decorators import action
 from rest_framework.response import Response
 from rest_framework.views import APIView
 from rest_framework.viewsets import ModelViewSet
 
-from surveys.models import Survey
+from surveys.models import Questionnaire, Question, Survey
 
-from .models import CleaningAction, Household, Interview, Respondent
+from .models import CleaningAction, Household, Interview, InterviewResponse, Respondent
 from .serializers import HouseholdSerializer, InterviewSerializer, RespondentSerializer
 
 
@@ -290,8 +295,167 @@ class InterviewViewSet(ModelViewSet):
     permission_classes = [IsAuthenticated]
 
     def get_queryset(self):
-        queryset = Interview.objects.select_related("survey", "household")
+        queryset = Interview.objects.select_related("survey", "household", "questionnaire")
         survey_id = self.request.query_params.get("survey")
         if survey_id:
             queryset = queryset.filter(survey_id=survey_id)
         return queryset
+
+    @action(detail=True, methods=["get", "put"], url_path="session")
+    def session(self, request, pk=None):
+        interview = self.get_object()
+        questionnaire = interview.questionnaire
+        if questionnaire is None:
+            questionnaire = (
+                Questionnaire.objects.filter(survey_id=interview.survey_id, status=Questionnaire.Status.PUBLISHED)
+                .prefetch_related("sections__questions__options")
+                .first()
+            )
+            if questionnaire:
+                interview.questionnaire = questionnaire
+                interview.save(update_fields=["questionnaire", "updated_at"])
+        if questionnaire is None:
+            return Response({"detail": "This survey does not have a published questionnaire yet."}, status=404)
+
+        sections = list(questionnaire.sections.all())
+        questions = [question for section in sections for question in section.questions.all()]
+        if request.method == "GET":
+            responses = {
+                str(response.question_id): response.answer
+                for response in interview.responses.filter(question__in=questions)
+            }
+            return Response(self._session_payload(interview, questionnaire, sections, responses))
+
+        if interview.status == Interview.Status.COMPLETED:
+            return Response({"detail": "This interview has already been completed."}, status=400)
+        submitted = request.data.get("answers", [])
+        complete = request.data.get("complete", False)
+        if not isinstance(submitted, list) or not isinstance(complete, bool):
+            return Response({"detail": "Answers must be a list and complete must be a boolean."}, status=400)
+
+        question_map = {question.id: question for question in questions}
+        normalized_answers = {}
+        for item in submitted:
+            if not isinstance(item, dict) or "question" not in item or "answer" not in item:
+                return Response({"detail": "Each answer needs a question ID and answer value."}, status=400)
+            try:
+                question_id = int(item["question"])
+            except (TypeError, ValueError):
+                return Response({"detail": "An answer contains an invalid question ID."}, status=400)
+            question = question_map.get(question_id)
+            if question is None:
+                return Response({"detail": "An answer refers to a question outside this questionnaire."}, status=400)
+            if question_id in normalized_answers:
+                return Response({"detail": "A question can only be submitted once per save."}, status=400)
+            answer = item["answer"]
+            validation_error = self._answer_error(question, answer)
+            if validation_error:
+                return Response({"detail": question.label + ": " + validation_error}, status=400)
+            normalized_answers[question_id] = answer
+
+        current_answers = {
+            response.question_id: response.answer
+            for response in interview.responses.filter(question__in=questions)
+        }
+        current_answers.update(normalized_answers)
+        if complete:
+            missing = [
+                question.label
+                for question in questions
+                if question.required and self._is_empty(current_answers.get(question.id))
+            ]
+            if missing:
+                return Response({"detail": "Complete the required questions: " + "; ".join(missing)}, status=400)
+
+        with transaction.atomic():
+            for question_id, answer in normalized_answers.items():
+                InterviewResponse.objects.update_or_create(
+                    interview=interview,
+                    question_id=question_id,
+                    defaults={"answer": answer},
+                )
+            if complete:
+                interview.status = Interview.Status.COMPLETED
+                interview.completed_at = timezone.now()
+                interview.save(update_fields=["status", "completed_at", "updated_at"])
+            elif interview.status == Interview.Status.NOT_STARTED:
+                interview.status = Interview.Status.IN_PROGRESS
+                interview.save(update_fields=["status", "updated_at"])
+
+        return Response({"detail": "Interview submitted successfully."} if complete else {"detail": "Progress saved."})
+
+    @staticmethod
+    def _is_empty(value):
+        return value is None or value == "" or value == []
+
+    @classmethod
+    def _answer_error(cls, question, answer):
+        if cls._is_empty(answer):
+            return None
+        question_type = question.question_type
+        if question_type in (Question.QuestionType.SHORT_TEXT, Question.QuestionType.LONG_TEXT):
+            if not isinstance(answer, str):
+                return "Enter text for this question."
+            if len(answer) > 10000:
+                return "Text answers must be 10,000 characters or fewer."
+        elif question_type == Question.QuestionType.NUMBER:
+            if isinstance(answer, bool) or not isinstance(answer, (int, float)) or not math.isfinite(answer):
+                return "Enter a valid number."
+        elif question_type in (Question.QuestionType.SINGLE_CHOICE, Question.QuestionType.DROPDOWN):
+            valid_values = set(question.options.values_list("value", flat=True))
+            if not isinstance(answer, str) or answer not in valid_values:
+                return "Choose one of the listed options."
+        elif question_type == Question.QuestionType.MULTIPLE_CHOICE:
+            valid_values = set(question.options.values_list("value", flat=True))
+            if not isinstance(answer, list) or any(not isinstance(value, str) or value not in valid_values for value in answer):
+                return "Choose only from the listed options."
+        elif question_type == Question.QuestionType.DATE:
+            if not isinstance(answer, str):
+                return "Enter a valid date."
+            try:
+                date.fromisoformat(answer)
+            except ValueError:
+                return "Enter a valid date."
+        elif question_type == Question.QuestionType.YES_NO and not isinstance(answer, bool):
+            return "Choose yes or no."
+        return None
+
+    @staticmethod
+    def _session_payload(interview, questionnaire, sections, responses):
+        return {
+            "interview": {
+                "id": interview.id,
+                "status": interview.status,
+                "household_id": interview.household.household_id,
+                "survey": interview.survey.name,
+                "started_at": interview.started_at,
+                "completed_at": interview.completed_at,
+            },
+            "questionnaire": {
+                "id": questionnaire.id,
+                "title": questionnaire.title,
+                "status": questionnaire.status,
+                "sections": [
+                    {
+                        "id": section.id,
+                        "title": section.title,
+                        "description": section.description,
+                        "questions": [
+                            {
+                                "id": question.id,
+                                "label": question.label,
+                                "question_type": question.question_type,
+                                "required": question.required,
+                                "options": [
+                                    {"label": option.label, "value": option.value}
+                                    for option in question.options.all()
+                                ],
+                                "answer": responses.get(str(question.id)),
+                            }
+                            for question in section.questions.all()
+                        ],
+                    }
+                    for section in sections
+                ],
+            },
+        }

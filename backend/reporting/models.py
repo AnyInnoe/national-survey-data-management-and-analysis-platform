@@ -10,6 +10,7 @@ class GeneratedReport(models.Model):
         DEMOGRAPHICS = "demographics", "Respondent Demographics"
         HOUSEHOLDS = "households", "Household Distribution"
         INTERVIEWS = "interviews", "Interview Progress"
+        RESPONSES = "responses", "Questionnaire Responses"
 
     title = models.CharField(max_length=200)
     report_type = models.CharField(max_length=30, choices=ReportType.choices)

@@ -1,6 +1,6 @@
 from django.contrib import admin
 
-from .models import CleaningAction, Household, Interview, Respondent
+from .models import CleaningAction, Household, Interview, InterviewResponse, Respondent
 
 
 @admin.register(Household)
@@ -22,6 +22,12 @@ class InterviewAdmin(admin.ModelAdmin):
     list_display = ("id", "survey", "household", "status", "started_at", "completed_at")
     list_filter = ("status", "survey")
     search_fields = ("household__household_id", "household__district")
+
+
+@admin.register(InterviewResponse)
+class InterviewResponseAdmin(admin.ModelAdmin):
+    list_display = ("interview", "question", "updated_at")
+    search_fields = ("interview__household__household_id", "question__label")
 
 
 @admin.register(CleaningAction)

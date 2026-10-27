@@ -14,9 +14,26 @@ ROLE_CHOICES = (
 ROLE_NAMES = [name for name, _label in ROLE_CHOICES]
 
 
+class UserRoleField(serializers.Field):
+    def get_attribute(self, instance):
+        return instance
+
+    def to_representation(self, user):
+        if user.is_staff or user.is_superuser:
+            return "Administrator"
+        assigned_roles = set(user.groups.filter(name__in=ROLE_NAMES).values_list("name", flat=True))
+        return next((role for role in ROLE_NAMES if role in assigned_roles), "Field Officer")
+
+    def to_internal_value(self, value):
+        allowed = {name for name, _label in ROLE_CHOICES}
+        if not isinstance(value, str) or value not in allowed:
+            raise serializers.ValidationError("Choose a valid user role.")
+        return value
+
+
 class UserAdminSerializer(serializers.ModelSerializer):
     full_name = serializers.SerializerMethodField()
-    role = serializers.ChoiceField(choices=ROLE_CHOICES, required=False)
+    role = UserRoleField(required=False)
     password = serializers.CharField(write_only=True, required=False, trim_whitespace=False)
 
     class Meta:
@@ -42,10 +59,7 @@ class UserAdminSerializer(serializers.ModelSerializer):
         return user.get_full_name().strip() or user.get_username()
 
     def get_role(self, user):
-        if user.is_staff or user.is_superuser:
-            return "Administrator"
-        assigned_roles = set(user.groups.filter(name__in=ROLE_NAMES).values_list("name", flat=True))
-        return next((role for role in ROLE_NAMES if role in assigned_roles), "Field Officer")
+        return UserRoleField().to_representation(user)
 
     def validate(self, attrs):
         request = self.context.get("request")
@@ -104,3 +118,19 @@ class UserAdminSerializer(serializers.ModelSerializer):
         instance.save()
         self._set_role(instance, role, self.context["request"].user)
         return instance
+
+
+class AccountSettingsSerializer(serializers.Serializer):
+    first_name = serializers.CharField(max_length=150, required=False, allow_blank=True)
+    last_name = serializers.CharField(max_length=150, required=False, allow_blank=True)
+    email = serializers.EmailField(required=False, allow_blank=True)
+    time_zone = serializers.CharField(max_length=64, required=False)
+    notification_preferences = serializers.DictField(
+        child=serializers.BooleanField(),
+        required=False,
+    )
+
+
+class ChangePasswordSerializer(serializers.Serializer):
+    current_password = serializers.CharField(write_only=True, trim_whitespace=False)
+    new_password = serializers.CharField(write_only=True, trim_whitespace=False)

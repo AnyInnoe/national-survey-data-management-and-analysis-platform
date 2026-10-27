@@ -3,7 +3,7 @@ from django.conf import settings
 from django.db import models
 from django.utils import timezone
 
-from surveys.models import Survey
+from surveys.models import Question, Questionnaire, Survey
 
 
 class Household(models.Model):
@@ -83,6 +83,13 @@ class Interview(models.Model):
         on_delete=models.CASCADE,
         related_name="interviews",
     )
+    questionnaire = models.ForeignKey(
+        Questionnaire,
+        null=True,
+        blank=True,
+        on_delete=models.PROTECT,
+        related_name="interviews",
+    )
     household = models.ForeignKey(
         Household,
         on_delete=models.CASCADE,
@@ -103,6 +110,30 @@ class Interview(models.Model):
 
     def __str__(self):
         return f"Interview {self.pk} · {self.household.household_id}"
+
+
+class InterviewResponse(models.Model):
+    interview = models.ForeignKey(
+        Interview,
+        on_delete=models.CASCADE,
+        related_name="responses",
+    )
+    question = models.ForeignKey(
+        Question,
+        on_delete=models.PROTECT,
+        related_name="interview_responses",
+    )
+    answer = models.JSONField(null=True, blank=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["question__section__order", "question__order", "question_id"]
+        constraints = [
+            models.UniqueConstraint(fields=["interview", "question"], name="unique_interview_question_response"),
+        ]
+
+    def __str__(self):
+        return f"{self.interview_id} · {self.question_id}"
 
 
 class CleaningAction(models.Model):

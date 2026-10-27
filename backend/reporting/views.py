@@ -3,6 +3,7 @@ from rest_framework import status, viewsets
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
+from data_collection.models import InterviewResponse
 
 from data_collection.models import Household, Interview, Respondent
 from surveys.models import Survey
@@ -118,6 +119,13 @@ class GenerateReportView(APIView):
                     "count": count,
                     "share_pct": share(count, dimension_total),
                 } for label, count in sorted(value_counts.items(), key=lambda pair: (-pair[1], pair[0])))
+        elif report_type == GeneratedReport.ReportType.RESPONSES:
+            data = questionnaire_response_rows(survey)
+            summary["questions_with_answers"] = len({row["question_id"] for row in data})
+            answer_query = InterviewResponse.objects.exclude(answer__isnull=True).exclude(answer="").exclude(answer=[])
+            if survey:
+                answer_query = answer_query.filter(interview__survey=survey)
+            summary["answer_records"] = answer_query.count()
         else:
             status_labels = dict(Interview.Status.choices)
             data = [
@@ -144,6 +152,104 @@ class GenerateReportView(APIView):
             generated_by=request.user,
         )
         return Response(GeneratedReportSerializer(report).data, status=status.HTTP_201_CREATED)
+
+
+class QuestionnaireResponseAnalysisView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        survey_id = request.query_params.get("survey")
+        if not survey_id:
+            return Response({"survey": "Select a survey."}, status=status.HTTP_400_BAD_REQUEST)
+        try:
+            survey = Survey.objects.get(pk=survey_id)
+        except (Survey.DoesNotExist, ValueError, TypeError):
+            return Response({"survey": "Select a valid survey."}, status=status.HTTP_400_BAD_REQUEST)
+        rows = questionnaire_response_rows(survey)
+        results = {}
+        for row in rows:
+            question_id = row["question_id"]
+            results.setdefault(question_id, {
+                "id": question_id,
+                "label": row["question"],
+                "type": row["question_type"],
+                "total_answers": row.get("total_answers", row.get("count", 0)),
+                "distribution": [],
+                "numeric_summary": row.get("numeric_summary"),
+            })
+            if "category" in row:
+                results[question_id]["distribution"].append({"label": row["category"], "count": row["count"]})
+        return Response(list(results.values()))
+
+
+def questionnaire_response_rows(survey):
+    responses = InterviewResponse.objects.select_related(
+        "interview", "question", "question__section"
+    ).prefetch_related("question__options")
+    if survey:
+        responses = responses.filter(interview__survey=survey)
+    grouped = {}
+    for response in responses:
+        answer = response.answer
+        if answer is None or answer == "" or answer == []:
+            continue
+        question = response.question
+        item = grouped.setdefault(question.id, {
+            "question_id": question.id,
+            "question": question.label,
+            "question_type": question.get_question_type_display(),
+            "type_code": question.question_type,
+            "total_answers": 0,
+            "values": [],
+            "option_counts": {},
+            "options": {option.value: option.label for option in question.options.all()},
+        })
+        item["total_answers"] += 1
+        item["values"].append(answer)
+        values = answer if isinstance(answer, list) else [answer]
+        for value in values:
+            key = str(value)
+            item["option_counts"][key] = item["option_counts"].get(key, 0) + 1
+
+    rows = []
+    for item in grouped.values():
+        common = {key: item[key] for key in ("question_id", "question", "question_type", "total_answers")}
+        if item["type_code"] in ("single_choice", "multiple_choice", "dropdown", "yes_no"):
+            labels = item["options"]
+            counts = item["option_counts"]
+            for value, label in labels.items():
+                count = counts.get(str(value), 0)
+                rows.append({
+                    **common,
+                    "category": label,
+                    "count": count,
+                    "share_pct": round(count / item["total_answers"] * 100, 1) if item["total_answers"] else 0.0,
+                })
+            for value, count in counts.items():
+                if value not in labels:
+                    rows.append({
+                        **common,
+                        "category": value,
+                        "count": count,
+                        "share_pct": round(count / item["total_answers"] * 100, 1) if item["total_answers"] else 0.0,
+                    })
+        elif item["type_code"] == "number":
+            numbers = []
+            for value in item["values"]:
+                try:
+                    numbers.append(float(value))
+                except (TypeError, ValueError):
+                    continue
+            summary = {
+                "mean": round(sum(numbers) / len(numbers), 2) if numbers else None,
+                "min": min(numbers) if numbers else None,
+                "max": max(numbers) if numbers else None,
+            }
+            rows.append({**common, "numeric_summary": summary})
+        else:
+            # Keep free text and dates private; the saved report exposes counts only.
+            rows.append({**common, "category": "Responses received", "count": item["total_answers"]})
+    return rows
 
 
 def _count_values(records, get_value):

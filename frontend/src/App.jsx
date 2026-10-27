@@ -558,6 +558,14 @@ const starterQuestionnaireQuestions = [
   { label: 'Sex', type: 'Single Choice', required: true, options: ['Male', 'Female'] },
 ]
 
+function makeSection(title, questions = [], description = '') {
+  return { clientKey: `section-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`, title, description, questions }
+}
+
+function starterQuestionnaireSections() {
+  return [makeSection('Household Information', starterQuestionnaireQuestions.map((question) => ({ ...question, options: [...question.options] })))]
+}
+
 function readLocalQuestionnaire(surveyName) {
   try {
     const saved = localStorage.getItem(`nsdmap:questionnaire:${surveyName}`)
@@ -585,16 +593,21 @@ const questionTypeFromApi = Object.fromEntries(
   Object.entries(questionTypeToApi).map(([label, value]) => [value, label]),
 )
 
-function questionsFromQuestionnaire(questionnaire) {
-  const questions = questionnaire?.sections?.[0]?.questions || []
-  if (questions.length === 0) return starterQuestionnaireQuestions
-
-  return questions.map((question) => ({
-    label: question.label,
-    type: questionTypeFromApi[question.question_type] || 'Text (Short)',
-    required: question.required,
-    options: (question.options || []).map((option) => option.label),
-  }))
+function sectionsFromQuestionnaire(questionnaire, surveyName = '') {
+  if (!questionnaire?.sections?.length) {
+    const legacyQuestions = readLocalQuestionnaire(surveyName)
+    return [makeSection('Household Information', legacyQuestions.map((question) => ({ ...question, options: [...(question.options || [])] })))]
+  }
+  return questionnaire.sections.map((section) => makeSection(
+    section.title,
+    (section.questions || []).map((question) => ({
+      label: question.label,
+      type: questionTypeFromApi[question.question_type] || 'Text (Short)',
+      required: question.required,
+      options: (question.options || []).map((option) => option.label),
+    })),
+    section.description || '',
+  ))
 }
 
 function getCsrfToken() {
@@ -631,7 +644,8 @@ function QuestionnaireBuilder() {
   const [saveError, setSaveError] = useState('')
   const [activeTab, setActiveTab] = useState('Structure')
   const [selectedQuestion, setSelectedQuestion] = useState(0)
-  const [questions, setQuestions] = useState(starterQuestionnaireQuestions)
+  const [selectedSection, setSelectedSection] = useState(0)
+  const [sections, setSections] = useState(starterQuestionnaireSections)
   const [saveMessage, setSaveMessage] = useState('')
 
   useEffect(() => {
@@ -661,20 +675,16 @@ function QuestionnaireBuilder() {
           const existing = questionnaireData.find(
             (item) => String(item.survey) === String(firstSurvey.id),
           )
-          setQuestions(
-            existing
-              ? questionsFromQuestionnaire(existing)
-              : readLocalQuestionnaire(firstSurvey.name),
-          )
+          setSections(sectionsFromQuestionnaire(existing, firstSurvey.name))
         } else {
           setSelectedSurvey('')
-          setQuestions(starterQuestionnaireQuestions)
+          setSections(starterQuestionnaireSections())
         }
       } catch (error) {
         if (!cancelled) {
           setSurveyError(error.message)
           setSelectedSurvey('')
-          setQuestions(starterQuestionnaireQuestions)
+          setSections(starterQuestionnaireSections())
         }
       } finally {
         if (!cancelled) setLoadingSurveys(false)
@@ -687,6 +697,8 @@ function QuestionnaireBuilder() {
     }
   }, [])
 
+  const currentSection = sections[selectedSection]
+  const questions = currentSection?.questions || []
   const currentQuestion = questions[selectedQuestion]
   const selectedSurveyRecord = surveys.find((survey) => survey.name === selectedSurvey)
   const existingQuestionnaire = questionnaires.find(
@@ -703,18 +715,20 @@ function QuestionnaireBuilder() {
         : [],
     }
 
-    setQuestions((current) => [...current, newQuestion])
+    setSections((current) => current.map((section, index) => index === selectedSection
+      ? { ...section, questions: [...section.questions, newQuestion] }
+      : section))
     setSelectedQuestion(questions.length)
     setSaveMessage('')
     setSaveError('')
   }
 
   function updateQuestion(field, value) {
-    setQuestions((current) =>
-      current.map((question, index) =>
-        index === selectedQuestion ? { ...question, [field]: value } : question,
-      ),
-    )
+    setSections((current) => current.map((section, sectionIndex) => sectionIndex === selectedSection
+      ? { ...section, questions: section.questions.map((question, index) => index === selectedQuestion
+        ? { ...question, [field]: value }
+        : question) }
+      : section))
     setSaveMessage('')
     setSaveError('')
   }
@@ -729,6 +743,84 @@ function QuestionnaireBuilder() {
     updateQuestion('options', [...currentQuestion.options, `Option ${currentQuestion.options.length + 1}`])
   }
 
+  function updateSection(field, value) {
+    setSections((current) => current.map((section, index) => index === selectedSection
+      ? { ...section, [field]: value }
+      : section))
+    setSaveMessage('')
+    setSaveError('')
+  }
+
+  function addSection() {
+    const next = [...sections, makeSection(`Section ${sections.length + 1}`)]
+    setSections(next)
+    setSelectedSection(next.length - 1)
+    setSelectedQuestion(0)
+    setSaveMessage('')
+    setSaveError('')
+  }
+
+  function moveSection(index, direction) {
+    const target = index + direction
+    if (target < 0 || target >= sections.length) return
+    setSections((current) => {
+      const next = [...current]
+      ;[next[index], next[target]] = [next[target], next[index]]
+      return next
+    })
+    if (selectedSection === index) setSelectedSection(target)
+    else if (selectedSection === target) setSelectedSection(index)
+  }
+
+  function deleteSection(index) {
+    if (sections.length <= 1) {
+      setSaveError('A questionnaire must keep at least one section.')
+      return
+    }
+    const next = sections.filter((_, sectionIndex) => sectionIndex !== index)
+    setSections(next)
+    setSelectedSection(Math.min(selectedSection >= index ? selectedSection - 1 : selectedSection, next.length - 1))
+    setSelectedQuestion(0)
+    setSaveMessage('')
+    setSaveError('')
+  }
+
+  function moveQuestion(index, direction) {
+    const target = index + direction
+    if (target < 0 || target >= questions.length) return
+    setSections((current) => current.map((section, sectionIndex) => {
+      if (sectionIndex !== selectedSection) return section
+      const next = [...section.questions]
+      ;[next[index], next[target]] = [next[target], next[index]]
+      return { ...section, questions: next }
+    }))
+    if (selectedQuestion === index) setSelectedQuestion(target)
+    else if (selectedQuestion === target) setSelectedQuestion(index)
+    setSaveMessage('')
+  }
+
+  function moveQuestionToSection(targetIndex) {
+    if (targetIndex === selectedSection || !currentQuestion) return
+    setSections((current) => current.map((section, index) => {
+      if (index === selectedSection) return { ...section, questions: section.questions.filter((_, questionIndex) => questionIndex !== selectedQuestion) }
+      if (index === targetIndex) return { ...section, questions: [...section.questions, currentQuestion] }
+      return section
+    }))
+    setSelectedSection(targetIndex)
+    setSelectedQuestion(sections[targetIndex].questions.length)
+    setSaveMessage('')
+  }
+
+  function deleteQuestion() {
+    if (!currentQuestion) return
+    setSections((current) => current.map((section, index) => index === selectedSection
+      ? { ...section, questions: section.questions.filter((_, questionIndex) => questionIndex !== selectedQuestion) }
+      : section))
+    setSelectedQuestion(Math.max(0, selectedQuestion - 1))
+    setSaveMessage('')
+    setSaveError('')
+  }
+
   function changeSurvey(surveyName) {
     const survey = surveys.find((item) => item.name === surveyName)
     const questionnaire = questionnaires.find(
@@ -736,17 +828,14 @@ function QuestionnaireBuilder() {
     )
 
     setSelectedSurvey(surveyName)
-    setQuestions(
-      questionnaire
-        ? questionsFromQuestionnaire(questionnaire)
-        : readLocalQuestionnaire(surveyName),
-    )
+    setSections(sectionsFromQuestionnaire(questionnaire, surveyName))
+    setSelectedSection(0)
     setSelectedQuestion(0)
     setSaveMessage('')
     setSaveError('')
   }
 
-  async function saveQuestionnaire() {
+  async function saveQuestionnaire(targetStatus = 'draft') {
     if (!selectedSurveyRecord) {
       setSaveError('Select a survey before saving its questionnaire.')
       return
@@ -756,17 +845,39 @@ function QuestionnaireBuilder() {
     setSaveError('')
     setSaveMessage('')
 
+    const cleanedSections = sections.map((section) => ({
+      ...section,
+      title: section.title.trim(),
+      description: section.description.trim(),
+      questions: section.questions.map((question) => ({ ...question, label: question.label.trim() })),
+    }))
+    const allQuestions = cleanedSections.flatMap((section) => section.questions)
+    if (cleanedSections.some((section) => !section.title)) {
+      setSaveError('Every section needs a title.')
+      setSaving(false)
+      return
+    }
+    if (targetStatus === 'published' && (cleanedSections.some((section) => section.questions.length === 0) || allQuestions.some((question) => !question.label))) {
+      setSaveError('To publish, give every section a question and every question a label.')
+      setSaving(false)
+      return
+    }
+    if (allQuestions.some((question) => ['Single Choice', 'Multiple Choice', 'Dropdown'].includes(question.type) && !(question.options || []).some((option) => String(option).trim()))) {
+      setSaveError('Each choice or dropdown question needs at least one option.')
+      setSaving(false)
+      return
+    }
+
     const payload = {
       survey: selectedSurveyRecord.id,
       title: selectedSurveyRecord.name,
       description: '',
-      status: 'draft',
-      sections: [
-        {
-          title: 'Household Information',
-          description: '',
-          order: 0,
-          questions: questions.map((question, questionIndex) => ({
+      status: targetStatus,
+      sections: cleanedSections.map((section, sectionIndex) => ({
+          title: section.title,
+          description: section.description,
+          order: sectionIndex,
+          questions: section.questions.map((question, questionIndex) => ({
             label: question.label.trim(),
             question_type: questionTypeToApi[question.type] || 'short_text',
             required: question.required,
@@ -776,31 +887,35 @@ function QuestionnaireBuilder() {
               return { label, value: label, order: optionIndex }
             }),
           })),
-        },
-      ],
+        })),
     }
 
     try {
-      localStorage.setItem(`nsdmap:questionnaire:${selectedSurvey}`, JSON.stringify(questions))
+      localStorage.setItem(`nsdmap:questionnaire:${selectedSurvey}`, JSON.stringify(sections))
 
-      const url = existingQuestionnaire
+      // Published versions stay immutable; saving edits creates a new version.
+      const updateExisting = existingQuestionnaire && existingQuestionnaire.status !== 'published'
+      const url = updateExisting
         ? `${API_BASE_URL}/questionnaires/${existingQuestionnaire.id}/`
         : `${API_BASE_URL}/questionnaires/`
       const saved = await apiRequest(url, {
-        method: existingQuestionnaire ? 'PATCH' : 'POST',
+        method: updateExisting ? 'PATCH' : 'POST',
         body: payload,
       })
 
       setQuestionnaires((current) => {
         const found = current.some((item) => item.id === saved.id)
-        return found
+        const updated = found
           ? current.map((item) => (item.id === saved.id ? saved : item))
           : [...current, saved]
+        return updated.sort((left, right) => new Date(right.created_at) - new Date(left.created_at))
       })
-      setQuestions(questionsFromQuestionnaire(saved))
-      setSaveMessage('Questionnaire saved to the database.')
+      setSections(sectionsFromQuestionnaire(saved, selectedSurvey))
+      setSaveMessage(targetStatus === 'published' ? 'Questionnaire published and ready for data collection.' : 'Questionnaire draft saved to the database.')
+      return saved
     } catch (error) {
       setSaveError(`${error.message} Your draft remains saved in this browser.`)
+      return null
     } finally {
       setSaving(false)
     }
@@ -838,13 +953,11 @@ function QuestionnaireBuilder() {
           ))}
         </select>
 
-        <button
-          className="primary-button"
-          type="button"
-          onClick={saveQuestionnaire}
-          disabled={!selectedSurveyRecord || loadingSurveys || saving}
-        >
-          {saving ? 'Saving...' : 'Save'}
+        <button className="secondary-button" type="button" onClick={() => saveQuestionnaire('draft')} disabled={!selectedSurveyRecord || loadingSurveys || saving}>
+          {saving ? 'Saving...' : 'Save Draft'}
+        </button>
+        <button className="primary-button" type="button" onClick={() => saveQuestionnaire('published')} disabled={!selectedSurveyRecord || loadingSurveys || saving || questions.length === 0}>
+          {saving ? 'Saving...' : 'Publish'}
         </button>
       </div>
 
@@ -998,6 +1111,8 @@ function QuestionnaireBuilder() {
             <input value={selectedSurvey} readOnly />
           </label>
           <p>Choose a survey above to manage its questionnaire.</p>
+          {selectedSurveyRecord && <p>Current version: <strong>{existingQuestionnaire?.status || 'Not saved'}</strong></p>}
+          <p>Published versions are locked. Editing and saving creates a new questionnaire version.</p>
         </div>
       )}
     </section>
@@ -1005,23 +1120,30 @@ function QuestionnaireBuilder() {
 }
 function DataCollection() {
   const [surveys, setSurveys] = useState([])
+  const [questionnaires, setQuestionnaires] = useState([])
   const [selectedSurveyId, setSelectedSurveyId] = useState('')
+  const [interviews, setInterviews] = useState([])
   const [loadingSurveys, setLoadingSurveys] = useState(true)
+  const [loadingInterviews, setLoadingInterviews] = useState(false)
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState('')
   const [message, setMessage] = useState('')
-  const [savedHouseholdId, setSavedHouseholdId] = useState('')
+  const [activeInterviewId, setActiveInterviewId] = useState(null)
+  const [reloadKey, setReloadKey] = useState(0)
   const [formData, setFormData] = useState({ district: '', parish: '', village: '', region: '' })
 
   useEffect(() => {
     let cancelled = false
-
     async function loadSurveys() {
       try {
-        const data = await apiRequest(`${API_BASE_URL}/surveys/`)
+        const [data, questionnaireData] = await Promise.all([
+          apiRequest(API_BASE_URL + '/surveys/'),
+          apiRequest(API_BASE_URL + '/questionnaires/'),
+        ])
         if (!cancelled) {
           setSurveys(data)
-          setSelectedSurveyId(data[0] ? String(data[0].id) : '')
+          setQuestionnaires(questionnaireData)
+          setSelectedSurveyId((current) => current || (data[0] ? String(data[0].id) : ''))
         }
       } catch (requestError) {
         if (!cancelled) setError(requestError.message)
@@ -1029,12 +1151,30 @@ function DataCollection() {
         if (!cancelled) setLoadingSurveys(false)
       }
     }
-
     loadSurveys()
-    return () => {
-      cancelled = true
-    }
+    return () => { cancelled = true }
   }, [])
+
+  useEffect(() => {
+    let cancelled = false
+    if (!selectedSurveyId) {
+      setInterviews([])
+      return () => { cancelled = true }
+    }
+    async function loadInterviews() {
+      setLoadingInterviews(true)
+      try {
+        const data = await apiRequest(API_BASE_URL + '/interviews/?survey=' + encodeURIComponent(selectedSurveyId))
+        if (!cancelled) setInterviews(data)
+      } catch (requestError) {
+        if (!cancelled) setError(requestError.message)
+      } finally {
+        if (!cancelled) setLoadingInterviews(false)
+      }
+    }
+    loadInterviews()
+    return () => { cancelled = true }
+  }, [selectedSurveyId, reloadKey])
 
   function updateField(event) {
     const { name, value } = event.target
@@ -1048,10 +1188,8 @@ function DataCollection() {
     setSaving(true)
     setError('')
     setMessage('')
-    setSavedHouseholdId('')
-
     try {
-      const household = await apiRequest(`${API_BASE_URL}/households/`, {
+      const household = await apiRequest(API_BASE_URL + '/households/', {
         method: 'POST',
         body: {
           survey: Number(selectedSurveyId),
@@ -1061,22 +1199,18 @@ function DataCollection() {
           region: formData.region,
         },
       })
-
-      setSavedHouseholdId(household.household_id)
-      try {
-        await apiRequest(`${API_BASE_URL}/interviews/`, {
-          method: 'POST',
-          body: {
-            survey: Number(selectedSurveyId),
-            household: household.id,
-            status: 'in_progress',
-          },
-        })
-        setMessage(`Household ${household.household_id} saved and an interview was started.`)
-      } catch (interviewError) {
-        setMessage(`Household ${household.household_id} was saved. Interview start failed: ${interviewError.message}`)
-      }
+      const interview = await apiRequest(API_BASE_URL + '/interviews/', {
+        method: 'POST',
+        body: {
+          survey: Number(selectedSurveyId),
+          household: household.id,
+          status: 'in_progress',
+        },
+      })
       setFormData({ district: '', parish: '', village: '', region: '' })
+      setMessage('Household ' + household.household_id + ' was saved. Complete its interview below.')
+      setActiveInterviewId(interview.id)
+      setReloadKey((current) => current + 1)
     } catch (requestError) {
       setError(requestError.message)
     } finally {
@@ -1084,81 +1218,291 @@ function DataCollection() {
     }
   }
 
+  function formatStatus(value) {
+    return value ? value.replaceAll('_', ' ').replace(/\b\w/g, (letter) => letter.toUpperCase()) : 'Unknown'
+  }
+
+  const hasQuestionnaire = questionnaires.some(
+    (questionnaire) => String(questionnaire.survey) === String(selectedSurveyId) && questionnaire.status === 'published',
+  )
+
+  if (activeInterviewId) {
+    return (
+      <InterviewWorkspace
+        interviewId={activeInterviewId}
+        onClose={() => setActiveInterviewId(null)}
+        onComplete={() => setReloadKey((current) => current + 1)}
+      />
+    )
+  }
+
   return (
-    <form className="panel collection-panel" onSubmit={saveHousehold}>
-      <div className="collection-meta">
-        <label>
-          Survey
-          <select
-            value={selectedSurveyId}
-            onChange={(event) => setSelectedSurveyId(event.target.value)}
-            required
-            disabled={loadingSurveys || surveys.length === 0}
-          >
-            <option value="">{loadingSurveys ? 'Loading surveys...' : 'Select a survey'}</option>
-            {surveys.map((survey) => (
-              <option key={survey.id} value={survey.id}>{survey.name}</option>
-            ))}
-          </select>
-        </label>
-        <label>
-          Household ID
-          <input value={savedHouseholdId || 'Assigned after saving'} readOnly />
-        </label>
-      </div>
-
-      <div className="collection-section-heading">
-        <div>
-          <h3>Household Information</h3>
-          <p>Save a household under the selected survey. You can add its members in the Respondents module.</p>
+    <div style={{ display: 'grid', gap: '14px' }}>
+      <form className="panel collection-panel" onSubmit={saveHousehold}>
+        <div className="collection-meta">
+          <label>
+            Survey
+            <select
+              value={selectedSurveyId}
+              onChange={(event) => setSelectedSurveyId(event.target.value)}
+              required
+              disabled={loadingSurveys || surveys.length === 0}
+            >
+              <option value="">{loadingSurveys ? 'Loading surveys...' : 'Select a survey'}</option>
+              {surveys.map((survey) => <option key={survey.id} value={survey.id}>{survey.name}</option>)}
+            </select>
+          </label>
+          <label>Household ID<input value="Assigned after saving" readOnly /></label>
         </div>
-      </div>
 
-      {error && <p role="alert" className="form-error">{error}</p>}
-      {message && <p role="status" className="saved-message">{message}</p>}
+        <div className="collection-section-heading">
+          <div>
+            <h3>Household Information</h3>
+            <p>Save a household, then capture answers using the questionnaire assigned to its survey.</p>
+          </div>
+        </div>
 
-      <div className="collection-fields">
-        <label>
-          District <span className="required-mark">*</span>
-          <select name="district" value={formData.district} onChange={updateField} required>
-            <option value="">Select District</option>
-            <option value="Kampala">Kampala</option>
-            <option value="Wakiso">Wakiso</option>
-            <option value="Mukono">Mukono</option>
-            <option value="Masaka">Masaka</option>
-            <option value="Mbarara">Mbarara</option>
-            <option value="Gulu">Gulu</option>
-          </select>
-        </label>
-        <label>
-          Parish <span className="required-mark">*</span>
-          <input name="parish" value={formData.parish} onChange={updateField} placeholder="Enter Parish" required />
-        </label>
-        <label>
-          Village / EA <span className="required-mark">*</span>
-          <input name="village" value={formData.village} onChange={updateField} placeholder="Enter Village / EA" required />
-        </label>
-        <label>
-          Region <span className="required-mark">*</span>
-          <select name="region" value={formData.region} onChange={updateField} required>
-            <option value="">Select Region</option>
-            <option value="Central">Central</option>
-            <option value="Eastern">Eastern</option>
-            <option value="Northern">Northern</option>
-            <option value="Western">Western</option>
-          </select>
-        </label>
-      </div>
+        {!loadingSurveys && selectedSurveyId && !hasQuestionnaire && (
+          <p role="status" className="form-error">Publish a questionnaire for this survey in the Questionnaires module before starting collection.</p>
+        )}
 
-      <div className="collection-actions">
-        <span className="collection-progress">A household ID is assigned when the record is saved.</span>
-        <button className="primary-button" type="submit" disabled={saving || loadingSurveys || !selectedSurveyId}>
-          {saving ? 'Saving...' : 'Save Household & Start Interview'}
-        </button>
-      </div>
-    </form>
+        {error && <p role="alert" className="form-error">{error}</p>}
+        {message && <p role="status" className="saved-message">{message}</p>}
+
+        <div className="collection-fields">
+          <label>
+            District <span className="required-mark">*</span>
+            <select name="district" value={formData.district} onChange={updateField} required>
+              <option value="">Select District</option>
+              <option value="Kampala">Kampala</option><option value="Wakiso">Wakiso</option>
+              <option value="Mukono">Mukono</option><option value="Masaka">Masaka</option>
+              <option value="Mbarara">Mbarara</option><option value="Gulu">Gulu</option>
+            </select>
+          </label>
+          <label>Parish <span className="required-mark">*</span><input name="parish" value={formData.parish} onChange={updateField} placeholder="Enter Parish" required /></label>
+          <label>Village / EA <span className="required-mark">*</span><input name="village" value={formData.village} onChange={updateField} placeholder="Enter Village / EA" required /></label>
+          <label>
+            Region <span className="required-mark">*</span>
+            <select name="region" value={formData.region} onChange={updateField} required>
+              <option value="">Select Region</option>
+              <option value="Central">Central</option><option value="Eastern">Eastern</option>
+              <option value="Northern">Northern</option><option value="Western">Western</option>
+            </select>
+          </label>
+        </div>
+
+        <div className="collection-actions">
+          <span className="collection-progress">A household and an interview will be created together.</span>
+          <button className="primary-button" type="submit" disabled={saving || loadingSurveys || !selectedSurveyId || !hasQuestionnaire}>
+            {saving ? 'Saving...' : 'Save Household & Start Interview'}
+          </button>
+        </div>
+      </form>
+
+      <section className="panel survey-management">
+        <h3>Interviews for selected survey</h3>
+        <div className="table-scroll">
+          <table>
+            <thead><tr><th>Interview</th><th>Household</th><th>Status</th><th>Started</th><th>Action</th></tr></thead>
+            <tbody>
+              {loadingInterviews ? (
+                <tr><td colSpan="5" className="empty-state">Loading interviews...</td></tr>
+              ) : interviews.map((interview) => (
+                <tr key={interview.id}>
+                  <td>INT-{String(interview.id).padStart(6, '0')}</td>
+                  <td>{interview.household_id}</td>
+                  <td><span className={'status-badge ' + interview.status}>{formatStatus(interview.status)}</span></td>
+                  <td>{interview.started_at ? new Date(interview.started_at).toLocaleString() : '—'}</td>
+                  <td>
+                    {interview.status === 'completed'
+                      ? <span className="empty-state" style={{ padding: 0 }}>Submitted</span>
+                      : <button className="secondary-button" type="button" onClick={() => setActiveInterviewId(interview.id)}>Resume interview</button>}
+                  </td>
+                </tr>
+              ))}
+              {!loadingInterviews && interviews.length === 0 && (
+                <tr><td colSpan="5" className="empty-state">No interviews for this survey yet.</td></tr>
+              )}
+            </tbody>
+          </table>
+        </div>
+      </section>
+    </div>
   )
 }
+
+function InterviewWorkspace({ interviewId, onClose, onComplete }) {
+  const [session, setSession] = useState(null)
+  const [answers, setAnswers] = useState({})
+  const [loading, setLoading] = useState(true)
+  const [saving, setSaving] = useState(false)
+  const [error, setError] = useState('')
+  const [message, setMessage] = useState('')
+
+  useEffect(() => {
+    let cancelled = false
+    async function loadSession() {
+      setLoading(true)
+      setError('')
+      try {
+        const data = await apiRequest(API_BASE_URL + '/interviews/' + interviewId + '/session/')
+        if (!cancelled) {
+          setSession(data)
+          const initial = {}
+          data.questionnaire.sections.forEach((section) => section.questions.forEach((question) => {
+            initial[question.id] = question.answer ?? (question.question_type === 'multiple_choice' ? [] : '')
+          }))
+          setAnswers(initial)
+        }
+      } catch (requestError) {
+        if (!cancelled) setError(requestError.message)
+      } finally {
+        if (!cancelled) setLoading(false)
+      }
+    }
+    loadSession()
+    return () => { cancelled = true }
+  }, [interviewId])
+
+  const questions = session?.questionnaire?.sections.flatMap((section) => section.questions) || []
+  const requiredQuestions = questions.filter((question) => question.required)
+  const answeredRequired = requiredQuestions.filter((question) => {
+    const value = answers[question.id]
+    return value !== undefined && value !== null && value !== '' && !(Array.isArray(value) && value.length === 0)
+  }).length
+
+  function setAnswer(question, value) {
+    setAnswers((current) => ({ ...current, [question.id]: value }))
+    setError('')
+    setMessage('')
+  }
+
+  function renderQuestion(question) {
+    const value = answers[question.id]
+    const inputStyle = { minHeight: '38px', padding: '8px 10px', border: '1px solid #d9e0e4', borderRadius: '5px', background: '#fff', color: '#34434b', font: 'inherit' }
+    if (question.question_type === 'long_text') {
+      return <textarea rows="4" aria-label={question.label} style={inputStyle} value={value ?? ''} onChange={(event) => setAnswer(question, event.target.value)} disabled={session.interview.status === 'completed'} />
+    }
+    if (question.question_type === 'single_choice' || question.question_type === 'dropdown') {
+      return (
+        <select aria-label={question.label} style={inputStyle} value={value ?? ''} onChange={(event) => setAnswer(question, event.target.value)} disabled={session.interview.status === 'completed'}>
+          <option value="">Select an answer</option>
+          {question.options.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}
+        </select>
+      )
+    }
+    if (question.question_type === 'multiple_choice') {
+      const selected = Array.isArray(value) ? value : []
+      return (
+        <div className="interview-options" role="group" aria-label={question.label}>
+          {question.options.map((option) => (
+            <label key={option.value}>
+              <input
+                type="checkbox"
+                checked={selected.includes(option.value)}
+                disabled={session.interview.status === 'completed'}
+                onChange={(event) => setAnswer(question, event.target.checked ? [...selected, option.value] : selected.filter((item) => item !== option.value))}
+              />
+              {option.label}
+            </label>
+          ))}
+        </div>
+      )
+    }
+    if (question.question_type === 'yes_no') {
+      return (
+        <select aria-label={question.label} style={inputStyle} value={value === true ? 'true' : value === false ? 'false' : ''} onChange={(event) => setAnswer(question, event.target.value === '' ? '' : event.target.value === 'true')} disabled={session.interview.status === 'completed'}>
+          <option value="">Select an answer</option><option value="true">Yes</option><option value="false">No</option>
+        </select>
+      )
+    }
+    const type = question.question_type === 'number' ? 'number' : question.question_type === 'date' ? 'date' : 'text'
+    return (
+      <input
+        type={type}
+        aria-label={question.label}
+        style={inputStyle}
+        value={value ?? ''}
+        onChange={(event) => setAnswer(question, type === 'number' && event.target.value !== '' ? Number(event.target.value) : event.target.value)}
+        disabled={session.interview.status === 'completed'}
+      />
+    )
+  }
+
+  async function saveSession(complete) {
+    setSaving(true)
+    setError('')
+    setMessage('')
+    const submittedAnswers = questions.map((question) => ({
+      question: question.id,
+      answer: answers[question.id] ?? (question.question_type === 'multiple_choice' ? [] : null),
+    }))
+    try {
+      const result = await apiRequest(API_BASE_URL + '/interviews/' + interviewId + '/session/', {
+        method: 'PUT',
+        body: { answers: submittedAnswers, complete },
+      })
+      if (complete) {
+        setSession((current) => ({ ...current, interview: { ...current.interview, status: 'completed' } }))
+        setMessage(result.detail)
+        onComplete()
+      } else {
+        setMessage(result.detail)
+      }
+    } catch (requestError) {
+      setError(requestError.message)
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  if (loading) return <section className="panel"><p className="empty-state">Loading interview questionnaire...</p></section>
+
+  if (!session) {
+    return (
+      <section className="panel interview-workspace">
+        {error && <p role="alert" className="form-error">{error}</p>}
+        <p>Publish a questionnaire for this survey in the Questionnaires module, then reopen this interview.</p>
+        <button className="secondary-button" type="button" onClick={onClose}>Back to Data Collection</button>
+      </section>
+    )
+  }
+
+  const completed = session.interview.status === 'completed'
+  return (
+    <section className="panel interview-workspace">
+      <div className="interview-heading">
+        <div>
+          <h3>{session.questionnaire.title}</h3>
+          <p>{session.interview.household_id} · {session.interview.survey} · {completed ? 'Completed' : 'Required answers ' + answeredRequired + ' of ' + requiredQuestions.length}</p>
+        </div>
+        <button className="secondary-button" type="button" onClick={onClose}>Back to Data Collection</button>
+      </div>
+      {error && <p role="alert" className="form-error">{error}</p>}
+      {message && <p role="status" className="saved-message">{message}</p>}
+      {session.questionnaire.sections.map((section) => (
+        <section className="interview-section" key={section.id}>
+          <h4>{section.title}</h4>
+          {section.description && <p>{section.description}</p>}
+          {section.questions.map((question, index) => (
+            <div className="interview-question" key={question.id}>
+              <span>{question.label}{question.required && <em> *</em>}</span>
+              {renderQuestion(question)}
+            </div>
+          ))}
+        </section>
+      ))}
+      {!completed && (
+        <div className="interview-actions">
+          <span>{requiredQuestions.length ? answeredRequired + ' required answers entered' : 'No required questions in this questionnaire'}</span>
+          <button className="secondary-button" type="button" disabled={saving} onClick={() => saveSession(false)}>{saving ? 'Saving...' : 'Save Progress'}</button>
+          <button className="primary-button" type="button" disabled={saving} onClick={() => saveSession(true)}>{saving ? 'Submitting...' : 'Submit Interview'}</button>
+        </div>
+      )}
+    </section>
+  )
+}
+
 function HouseholdManagement() {
   const [search, setSearch] = useState('')
   const [households, setHouseholds] = useState([])
@@ -1944,6 +2288,7 @@ function DataAnalysis() {
   const [selectedIndicator, setSelectedIndicator] = useState('Respondents by Sex')
   const [appliedIndicator, setAppliedIndicator] = useState('Respondents by Sex')
   const [records, setRecords] = useState({ households: [], respondents: [], interviews: [] })
+  const [questionAnalyses, setQuestionAnalyses] = useState([])
   const [loadingSurveys, setLoadingSurveys] = useState(true)
   const [loadingData, setLoadingData] = useState(false)
   const [error, setError] = useState('')
@@ -1985,6 +2330,7 @@ function DataAnalysis() {
     let cancelled = false
     if (!selectedSurveyId) {
       setRecords({ households: [], respondents: [], interviews: [] })
+      setQuestionAnalyses([])
       setLoadingData(false)
       return () => { cancelled = true }
     }
@@ -1995,12 +2341,16 @@ function DataAnalysis() {
       setRecords({ households: [], respondents: [], interviews: [] })
       const query = '?survey=' + encodeURIComponent(selectedSurveyId)
       try {
-        const [households, respondents, interviews] = await Promise.all([
+        const [households, respondents, interviews, questionnaireResponses] = await Promise.all([
           apiRequest(API_BASE_URL + '/households/' + query),
           apiRequest(API_BASE_URL + '/respondents/' + query),
           apiRequest(API_BASE_URL + '/interviews/' + query),
+          apiRequest(API_BASE_URL + '/analysis/questionnaire-responses/' + query),
         ])
-        if (!cancelled) setRecords({ households, respondents, interviews })
+        if (!cancelled) {
+          setRecords({ households, respondents, interviews })
+          setQuestionAnalyses(questionnaireResponses)
+        }
       } catch (requestError) {
         if (!cancelled) setError(requestError.message)
       } finally {
@@ -2013,13 +2363,26 @@ function DataAnalysis() {
   }, [selectedSurveyId, reloadKey])
 
   const selectedSurvey = surveys.find((survey) => String(survey.id) === String(selectedSurveyId))
+  const selectedQuestionAnalysis = appliedIndicator.startsWith('question:')
+    ? questionAnalyses.find((item) => String(item.id) === appliedIndicator.slice('question:'.length))
+    : null
   const completedInterviews = records.interviews.filter((item) => item.status === 'completed').length
   const interviewCompletion = records.interviews.length
     ? Math.round((completedInterviews / records.interviews.length) * 100)
     : 0
 
   let distribution = []
-  if (appliedIndicator === 'Respondents by Sex') {
+  if (selectedQuestionAnalysis) {
+    distribution = selectedQuestionAnalysis.distribution || []
+    if (selectedQuestionAnalysis.numeric_summary) {
+      const stats = selectedQuestionAnalysis.numeric_summary
+      distribution = [
+        { label: 'Average', count: stats.mean ?? 0 },
+        { label: 'Minimum', count: stats.min ?? 0 },
+        { label: 'Maximum', count: stats.max ?? 0 },
+      ]
+    }
+  } else if (appliedIndicator === 'Respondents by Sex') {
     distribution = [
       { label: 'Female', count: records.respondents.filter((item) => item.sex === 'female').length },
       { label: 'Male', count: records.respondents.filter((item) => item.sex === 'male').length },
@@ -2069,7 +2432,9 @@ function DataAnalysis() {
     ]
   }
 
-  const distributionTotal = distribution.reduce((total, item) => total + item.count, 0)
+  const distributionTotal = selectedQuestionAnalysis
+    ? selectedQuestionAnalysis.total_answers
+    : distribution.reduce((total, item) => total + item.count, 0)
   const maxCount = Math.max(1, ...distribution.map((item) => item.count))
 
   function exportDistribution() {
@@ -2106,7 +2471,10 @@ function DataAnalysis() {
           <label>
             Indicator
             <select value={selectedIndicator} onChange={(event) => setSelectedIndicator(event.target.value)}>
-              {indicators.map((indicator) => <option key={indicator}>{indicator}</option>)}
+              <optgroup label="Standard indicators">{indicators.map((indicator) => <option key={indicator}>{indicator}</option>)}</optgroup>
+              {questionAnalyses.length > 0 && <optgroup label="Questionnaire questions">
+                {questionAnalyses.map((question) => <option key={question.id} value={'question:' + question.id}>{question.label}</option>)}
+              </optgroup>}
             </select>
           </label>
           <button className="primary-button" type="button" onClick={() => setAppliedIndicator(selectedIndicator)} disabled={!selectedSurveyId || loadingData}>
@@ -2132,8 +2500,8 @@ function DataAnalysis() {
       <section className="panel analysis-panel">
         <div className="analysis-heading">
           <div>
-            <h3>{appliedIndicator}</h3>
-            <p>{selectedSurvey?.name || 'Select a survey'} · {distributionTotal.toLocaleString()} records in this distribution</p>
+            <h3>{selectedQuestionAnalysis?.label || appliedIndicator}</h3>
+            <p>{selectedSurvey?.name || 'Select a survey'} · {selectedQuestionAnalysis ? selectedQuestionAnalysis.total_answers.toLocaleString() + ' answers' : distributionTotal.toLocaleString() + ' records in this distribution'}</p>
           </div>
           <span>{loadingData ? 'Updating…' : 'Live data'}</span>
         </div>
@@ -2142,7 +2510,13 @@ function DataAnalysis() {
           <p className="empty-state">Loading analysis data...</p>
         ) : !selectedSurveyId ? (
           <p className="empty-state">Create a survey before viewing analysis.</p>
-        ) : distributionTotal === 0 ? (
+        ) : selectedQuestionAnalysis?.numeric_summary ? (
+          <div className="metric-grid">
+            <MetricCard label="Average" value={selectedQuestionAnalysis.numeric_summary.mean ?? '—'} note="Numeric answers" />
+            <MetricCard label="Minimum" value={selectedQuestionAnalysis.numeric_summary.min ?? '—'} note="Numeric answers" />
+            <MetricCard label="Maximum" value={selectedQuestionAnalysis.numeric_summary.max ?? '—'} note="Numeric answers" />
+          </div>
+        ) : distribution.length === 0 || distribution.every((item) => item.count === 0) ? (
           <p className="empty-state">No records are available for this indicator in the selected survey.</p>
         ) : (
           <div className="analysis-bars">
@@ -2180,6 +2554,7 @@ function Reports() {
     { value: 'demographics', label: 'Respondent Demographics' },
     { value: 'households', label: 'Household Distribution' },
     { value: 'interviews', label: 'Interview Progress' },
+    { value: 'responses', label: 'Questionnaire Responses' },
   ]
   const [search, setSearch] = useState('')
   const [surveys, setSurveys] = useState([])
@@ -2398,50 +2773,97 @@ function Reports() {
       )}
     </div>
   )
-}function UserManagement() {
+}
+
+function UserManagement() {
+  const roles = ['Administrator', 'Supervisor', 'Data Analyst', 'Field Officer']
   const [search, setSearch] = useState('')
   const [selectedRole, setSelectedRole] = useState('All roles')
   const [selectedStatus, setSelectedStatus] = useState('All statuses')
   const [showForm, setShowForm] = useState(false)
+  const [newUser, setNewUser] = useState({ first_name: '', last_name: '', username: '', email: '', role: 'Field Officer', password: '' })
+  const [users, setUsers] = useState([])
+  const [loading, setLoading] = useState(true)
+  const [saving, setSaving] = useState(false)
+  const [savingUserId, setSavingUserId] = useState(null)
+  const [error, setError] = useState('')
   const [message, setMessage] = useState('')
-  const [newUser, setNewUser] = useState({ name: '', email: '', role: 'Field Officer' })
-  const [users, setUsers] = useState([
-    { id: 'USR-001', name: 'John Doe', email: 'john.doe@example.org', role: 'Administrator', lastActive: '19 May 2025', status: 'Active' },
-    { id: 'USR-002', name: 'Jane Smith', email: 'jane.smith@example.org', role: 'Supervisor', lastActive: '19 May 2025', status: 'Active' },
-    { id: 'USR-003', name: 'Mary N.', email: 'mary.n@example.org', role: 'Data Analyst', lastActive: '18 May 2025', status: 'Active' },
-    { id: 'USR-004', name: 'Peter O.', email: 'peter.o@example.org', role: 'Field Officer', lastActive: '16 May 2025', status: 'Inactive' },
-  ])
+  const [reloadKey, setReloadKey] = useState(0)
 
-  const roles = ['Administrator', 'Supervisor', 'Data Analyst', 'Field Officer']
+  useEffect(() => {
+    let cancelled = false
+    async function loadUsers() {
+      setLoading(true)
+      setError('')
+      try {
+        const data = await apiRequest(API_BASE_URL + '/users/')
+        if (!cancelled) setUsers(Array.isArray(data) ? data : [])
+      } catch (requestError) {
+        if (!cancelled) setError(requestError.message)
+      } finally {
+        if (!cancelled) setLoading(false)
+      }
+    }
+    loadUsers()
+    return () => { cancelled = true }
+  }, [reloadKey])
+
   const visibleUsers = users.filter((user) => {
-    const matchesSearch = `${user.id} ${user.name} ${user.email} ${user.role}`
+    const matchesSearch = (user.username + ' ' + user.full_name + ' ' + user.email + ' ' + user.role)
       .toLowerCase()
       .includes(search.toLowerCase())
     const matchesRole = selectedRole === 'All roles' || user.role === selectedRole
-    const matchesStatus = selectedStatus === 'All statuses' || user.status === selectedStatus
+    const matchesStatus = selectedStatus === 'All statuses' || (selectedStatus === 'Active' ? user.is_active : !user.is_active)
     return matchesSearch && matchesRole && matchesStatus
   })
 
-  function addUser(event) {
-    event.preventDefault()
-    const user = {
-      id: `USR-${String(users.length + 1).padStart(3, '0')}`,
-      name: newUser.name.trim(),
-      email: newUser.email.trim(),
-      role: newUser.role,
-      lastActive: 'Never',
-      status: 'Active',
-    }
-    setUsers((current) => [...current, user])
-    setNewUser({ name: '', email: '', role: 'Field Officer' })
-    setShowForm(false)
-    setMessage(`${user.name} was added.`)
+  function updateForm(event) {
+    const { name, value } = event.target
+    setNewUser((current) => ({ ...current, [name]: value }))
   }
 
-  function toggleStatus(id) {
-    setUsers((current) => current.map((user) =>
-      user.id === id ? { ...user, status: user.status === 'Active' ? 'Inactive' : 'Active' } : user,
-    ))
+  function formatLastActive(value) {
+    return value ? new Date(value).toLocaleString() : 'Never'
+  }
+
+  async function addUser(event) {
+    event.preventDefault()
+    setSaving(true)
+    setError('')
+    setMessage('')
+    try {
+      const created = await apiRequest(API_BASE_URL + '/users/', {
+        method: 'POST',
+        body: { ...newUser, is_active: true },
+      })
+      setMessage('User ' + created.username + ' was created.')
+      setNewUser({ first_name: '', last_name: '', username: '', email: '', role: 'Field Officer', password: '' })
+      setShowForm(false)
+      setReloadKey((current) => current + 1)
+    } catch (requestError) {
+      setError(requestError.message)
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  async function updateUser(user, changes, successMessage) {
+    setSavingUserId(user.id)
+    setError('')
+    setMessage('')
+    try {
+      await apiRequest(API_BASE_URL + '/users/' + user.id + '/', {
+        method: 'PATCH',
+        body: changes,
+      })
+      setMessage(successMessage)
+      setReloadKey((current) => current + 1)
+    } catch (requestError) {
+      setError(requestError.message)
+      setReloadKey((current) => current + 1)
+    } finally {
+      setSavingUserId(null)
+    }
   }
 
   return (
@@ -2454,177 +2876,291 @@ function Reports() {
           value={search}
           onChange={(event) => setSearch(event.target.value)}
         />
-        <select
-          aria-label="Filter by role"
-          value={selectedRole}
-          onChange={(event) => setSelectedRole(event.target.value)}
-          style={{ minHeight: '38px', padding: '0 10px', border: '1px solid #d9e0e4', borderRadius: '5px', background: '#fff' }}
-        >
+        <select aria-label="Filter by role" value={selectedRole} onChange={(event) => setSelectedRole(event.target.value)}>
           <option>All roles</option>
           {roles.map((role) => <option key={role}>{role}</option>)}
         </select>
-        <select
-          aria-label="Filter by status"
-          value={selectedStatus}
-          onChange={(event) => setSelectedStatus(event.target.value)}
-          style={{ minHeight: '38px', padding: '0 10px', border: '1px solid #d9e0e4', borderRadius: '5px', background: '#fff' }}
-        >
-          <option>All statuses</option>
-          <option>Active</option>
-          <option>Inactive</option>
+        <select aria-label="Filter by status" value={selectedStatus} onChange={(event) => setSelectedStatus(event.target.value)}>
+          <option>All statuses</option><option>Active</option><option>Inactive</option>
         </select>
-        <button className="primary-button" type="button" onClick={() => { setShowForm((value) => !value); setMessage('') }}>
-          + Add User
+        <button className="primary-button" type="button" onClick={() => { setShowForm((value) => !value); setMessage(''); setError('') }}>
+          {showForm ? 'Cancel' : '+ Add User'}
+        </button>
+        <button className="secondary-button" type="button" onClick={() => setReloadKey((current) => current + 1)} disabled={loading}>
+          Refresh
         </button>
       </div>
 
-      {message && <p role="status" style={{ margin: '0 0 12px', color: '#36714a', fontSize: '12px' }}>{message}</p>}
+      {error && <p role="alert" className="form-error">Could not complete user management action: {error}</p>}
+      {message && <p role="status" className="saved-message">{message}</p>}
+      <p className="users-permission-note">Account administration is restricted to Django staff. Administrator access can only be granted by a superuser.</p>
 
       {showForm && (
-        <form onSubmit={addUser} className="panel" style={{ display: 'grid', gridTemplateColumns: 'repeat(3, minmax(0, 1fr)) auto', gap: '10px', alignItems: 'end', marginBottom: '16px', padding: '14px', background: '#f8fafb' }}>
-          <label style={{ display: 'grid', gap: '6px', color: '#526169', fontSize: '12px' }}>
-            Full name
-            <input required value={newUser.name} onChange={(event) => setNewUser((current) => ({ ...current, name: event.target.value }))} />
-          </label>
-          <label style={{ display: 'grid', gap: '6px', color: '#526169', fontSize: '12px' }}>
-            Email
-            <input required type="email" value={newUser.email} onChange={(event) => setNewUser((current) => ({ ...current, email: event.target.value }))} />
-          </label>
-          <label style={{ display: 'grid', gap: '6px', color: '#526169', fontSize: '12px' }}>
+        <form onSubmit={addUser} className="user-create-form">
+          <label>First name<input name="first_name" autoComplete="given-name" value={newUser.first_name} onChange={updateForm} required /></label>
+          <label>Last name<input name="last_name" autoComplete="family-name" value={newUser.last_name} onChange={updateForm} /></label>
+          <label>Username<input name="username" autoComplete="username" value={newUser.username} onChange={updateForm} required maxLength="150" /></label>
+          <label>Email<input name="email" type="email" autoComplete="email" value={newUser.email} onChange={updateForm} required /></label>
+          <label>
             Role
-            <select value={newUser.role} onChange={(event) => setNewUser((current) => ({ ...current, role: event.target.value }))}>
+            <select name="role" value={newUser.role} onChange={updateForm}>
               {roles.map((role) => <option key={role}>{role}</option>)}
             </select>
           </label>
-          <button className="primary-button" type="submit">Save User</button>
+          <label>Temporary password<input name="password" type="password" autoComplete="new-password" value={newUser.password} onChange={updateForm} required /></label>
+          <button className="primary-button" type="submit" disabled={saving}>{saving ? 'Creating...' : 'Create User'}</button>
         </form>
       )}
 
       <div className="table-scroll">
         <table>
           <thead>
-            <tr><th>User ID</th><th>Name</th><th>Email</th><th>Role</th><th>Last Active</th><th>Status</th><th>Action</th></tr>
+            <tr><th>User ID</th><th>Name</th><th>Username / Email</th><th>Role</th><th>Last Active</th><th>Status</th><th>Actions</th></tr>
           </thead>
           <tbody>
-            {visibleUsers.map((user) => (
+            {loading ? (
+              <tr><td colSpan="7" className="empty-state">Loading user accounts...</td></tr>
+            ) : visibleUsers.map((user) => (
               <tr key={user.id}>
-                <td>{user.id}</td><td>{user.name}</td><td>{user.email}</td><td>{user.role}</td><td>{user.lastActive}</td>
-                <td><span className={`status-badge ${user.status.toLowerCase()}`}>{user.status}</span></td>
+                <td>USR-{String(user.id).padStart(4, '0')}</td>
+                <td>{user.full_name}</td>
+                <td>{user.username}<br /><small>{user.email}</small></td>
                 <td>
-                  <button className="secondary-button" type="button" onClick={() => toggleStatus(user.id)}>
-                    {user.status === 'Active' ? 'Deactivate' : 'Activate'}
+                  <select
+                    aria-label={'Role for ' + user.username}
+                    value={user.role}
+                    onChange={(event) => updateUser(user, { role: event.target.value }, 'Role updated for ' + user.username + '.')}
+                    disabled={savingUserId === user.id || user.is_superuser}
+                  >
+                    {roles.map((role) => <option key={role}>{role}</option>)}
+                  </select>
+                </td>
+                <td>{formatLastActive(user.last_login)}</td>
+                <td><span className={'status-badge ' + (user.is_active ? 'active' : 'inactive')}>{user.is_active ? 'Active' : 'Inactive'}</span></td>
+                <td>
+                  <button
+                    className="secondary-button"
+                    type="button"
+                    disabled={savingUserId === user.id || user.is_superuser}
+                    onClick={() => updateUser(user, { is_active: !user.is_active }, user.username + ' was ' + (user.is_active ? 'deactivated.' : 'activated.'))}
+                  >
+                    {user.is_active ? 'Deactivate' : 'Activate'}
                   </button>
                 </td>
               </tr>
             ))}
-            {visibleUsers.length === 0 && (
-              <tr><td colSpan="7" className="empty-state">No matching users found.</td></tr>
+            {!loading && visibleUsers.length === 0 && (
+              <tr><td colSpan="7" className="empty-state">No user accounts match these filters.</td></tr>
             )}
           </tbody>
         </table>
       </div>
 
       <div className="table-footer">
-        <span>Showing {visibleUsers.length} of {users.length} users</span>
-        <div className="pagination" aria-label="User table pages">
-          <button type="button" disabled>‹</button>
-          <button type="button" className="current-page">1</button>
-          <button type="button">2</button>
-          <button type="button">›</button>
-        </div>
+        <span>Showing {visibleUsers.length} of {users.length} user accounts</span>
       </div>
     </section>
   )
 }
+
 function Settings() {
-  const [profile, setProfile] = useState({ name: 'User Name', email: 'user@example.org', role: 'Administrator' })
+  const [profile, setProfile] = useState({ first_name: '', last_name: '', email: '', role: '', time_zone: 'Africa/Kampala' })
   const [preferences, setPreferences] = useState({ emailAlerts: true, validationAlerts: true, weeklySummary: false })
+  const [password, setPassword] = useState({ current_password: '', new_password: '', confirm_password: '' })
+  const [loading, setLoading] = useState(true)
+  const [saving, setSaving] = useState(false)
+  const [changingPassword, setChangingPassword] = useState(false)
+  const [error, setError] = useState('')
   const [message, setMessage] = useState('')
+
+  useEffect(() => {
+    let cancelled = false
+    async function loadSettings() {
+      setLoading(true)
+      setError('')
+      try {
+        const data = await apiRequest(API_BASE_URL + '/account/settings/')
+        if (!cancelled) {
+          setProfile({
+            first_name: data.first_name || '',
+            last_name: data.last_name || '',
+            email: data.email || '',
+            role: data.role || '',
+            time_zone: data.time_zone || 'Africa/Kampala',
+          })
+          setPreferences((current) => ({ ...current, ...(data.notification_preferences || {}) }))
+        }
+      } catch (requestError) {
+        if (!cancelled) setError(requestError.message)
+      } finally {
+        if (!cancelled) setLoading(false)
+      }
+    }
+    loadSettings()
+    return () => { cancelled = true }
+  }, [])
 
   function updateProfile(event) {
     const { name, value } = event.target
     setProfile((current) => ({ ...current, [name]: value }))
+    setError('')
     setMessage('')
   }
 
   function togglePreference(name) {
     setPreferences((current) => ({ ...current, [name]: !current[name] }))
+    setError('')
     setMessage('')
   }
 
-  function saveSettings(event) {
+  async function saveSettings(event) {
     event.preventDefault()
-    setMessage('Settings saved successfully.')
+    setSaving(true)
+    setError('')
+    setMessage('')
+    try {
+      const data = await apiRequest(API_BASE_URL + '/account/settings/', {
+        method: 'PATCH',
+        body: {
+          first_name: profile.first_name.trim(),
+          last_name: profile.last_name.trim(),
+          email: profile.email.trim(),
+          time_zone: profile.time_zone,
+          notification_preferences: preferences,
+        },
+      })
+      setProfile((current) => ({ ...current, ...data }))
+      setPreferences(data.notification_preferences || preferences)
+      setMessage('Settings saved successfully.')
+    } catch (requestError) {
+      setError(requestError.message)
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  function updatePassword(event) {
+    const { name, value } = event.target
+    setPassword((current) => ({ ...current, [name]: value }))
+    setError('')
+    setMessage('')
+  }
+
+  async function changePassword(event) {
+    event.preventDefault()
+    setError('')
+    setMessage('')
+    if (password.new_password !== password.confirm_password) {
+      setError('The new password and confirmation do not match.')
+      return
+    }
+    setChangingPassword(true)
+    try {
+      const result = await apiRequest(API_BASE_URL + '/account/password/', {
+        method: 'POST',
+        body: {
+          current_password: password.current_password,
+          new_password: password.new_password,
+        },
+      })
+      setMessage(result.detail)
+      setPassword({ current_password: '', new_password: '', confirm_password: '' })
+    } catch (requestError) {
+      setError(requestError.message)
+    } finally {
+      setChangingPassword(false)
+    }
   }
 
   return (
-    <form onSubmit={saveSettings} style={{ display: 'grid', gap: '14px', maxWidth: '900px' }}>
-      <section className="panel" style={{ padding: '18px' }}>
-        <h3>Profile Information</h3>
-        <div className="collection-fields">
-          <label>
-            Full name
-            <input name="name" value={profile.name} onChange={updateProfile} required />
-          </label>
-          <label>
-            Email address
-            <input name="email" type="email" value={profile.email} onChange={updateProfile} required />
-          </label>
-          <label>
-            Role
-            <input value={profile.role} readOnly />
-          </label>
-          <label>
-            Time zone
-            <select defaultValue="Africa/Kampala">
-              <option value="Africa/Kampala">Africa/Kampala (EAT)</option>
-              <option value="UTC">UTC</option>
-            </select>
-          </label>
-        </div>
-      </section>
+    <div className="settings-page">
+      {loading && <p className="empty-state">Loading your settings...</p>}
+      {error && <p role="alert" className="form-error">{error}</p>}
+      {message && <p role="status" className="saved-message">{message}</p>}
 
-      <section className="panel" style={{ padding: '18px' }}>
-        <h3>Notifications</h3>
-        <div style={{ display: 'grid', gap: '14px' }}>
-          {[
-            ['emailAlerts', 'Email notifications', 'Receive important platform updates by email.'],
-            ['validationAlerts', 'Data quality alerts', 'Get notified about critical validation issues.'],
-            ['weeklySummary', 'Weekly summary', 'Receive a weekly survey activity summary.'],
-          ].map(([key, title, description]) => (
-            <label key={key} style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '16px', color: '#34434b', fontSize: '13px' }}>
-              <span>
-                <strong style={{ display: 'block', fontWeight: 600 }}>{title}</strong>
-                <small style={{ color: '#718087' }}>{description}</small>
-              </span>
-              <input
-                type="checkbox"
-                checked={preferences[key]}
-                onChange={() => togglePreference(key)}
-                aria-label={title}
-              />
+      <form onSubmit={saveSettings} className="settings-form">
+        <section className="panel settings-section">
+          <h3>Profile Information</h3>
+          <div className="collection-fields">
+            <label>
+              First name
+              <input name="first_name" value={profile.first_name} onChange={updateProfile} required disabled={loading} autoComplete="given-name" />
             </label>
-          ))}
-        </div>
-      </section>
+            <label>
+              Last name
+              <input name="last_name" value={profile.last_name} onChange={updateProfile} disabled={loading} autoComplete="family-name" />
+            </label>
+            <label>
+              Email address
+              <input name="email" type="email" value={profile.email} onChange={updateProfile} required disabled={loading} autoComplete="email" />
+            </label>
+            <label>
+              Role
+              <input value={profile.role} readOnly />
+            </label>
+            <label>
+              Time zone
+              <select name="time_zone" value={profile.time_zone} onChange={updateProfile} disabled={loading}>
+                <option value="Africa/Kampala">Africa/Kampala (EAT)</option>
+                <option value="UTC">UTC</option>
+              </select>
+            </label>
+          </div>
+        </section>
 
-      <section className="panel" style={{ padding: '18px' }}>
-        <h3>Security</h3>
-        <p style={{ margin: '0 0 14px', color: '#718087', fontSize: '12px' }}>
-          Keep your account secure by using a strong password and signing out on shared devices.
-        </p>
-        <button className="secondary-button" type="button" onClick={() => setMessage('Password change is not connected yet.') }>
-          Change Password
+        <section className="panel settings-section">
+          <h3>Notifications</h3>
+          <div className="settings-preferences">
+            {[
+              ['emailAlerts', 'Email notifications', 'Receive important platform updates by email.'],
+              ['validationAlerts', 'Data quality alerts', 'Get notified about critical validation issues.'],
+              ['weeklySummary', 'Weekly summary', 'Receive a weekly survey activity summary.'],
+            ].map(([key, title, description]) => (
+              <label key={key} className="settings-preference">
+                <span>
+                  <strong>{title}</strong>
+                  <small>{description}</small>
+                </span>
+                <input
+                  type="checkbox"
+                  checked={Boolean(preferences[key])}
+                  onChange={() => togglePreference(key)}
+                  aria-label={title}
+                  disabled={loading}
+                />
+              </label>
+            ))}
+          </div>
+        </section>
+
+        <button className="primary-button" type="submit" disabled={saving || loading}>
+          {saving ? 'Saving...' : 'Save Settings'}
         </button>
-      </section>
+      </form>
 
-      <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
-        <button className="primary-button" type="submit">Save Settings</button>
-        {message && <span role="status" style={{ color: '#36714a', fontSize: '12px' }}>{message}</span>}
-      </div>
-    </form>
+      <form onSubmit={changePassword} className="panel settings-section password-form">
+        <h3>Security</h3>
+        <p>Change your password using your current password and a new password that meets the account rules.</p>
+        <label>
+          Current password
+          <input name="current_password" type="password" autoComplete="current-password" value={password.current_password} onChange={updatePassword} required />
+        </label>
+        <label>
+          New password
+          <input name="new_password" type="password" autoComplete="new-password" value={password.new_password} onChange={updatePassword} required />
+        </label>
+        <label>
+          Confirm new password
+          <input name="confirm_password" type="password" autoComplete="new-password" value={password.confirm_password} onChange={updatePassword} required />
+        </label>
+        <button className="secondary-button" type="submit" disabled={changingPassword}>
+          {changingPassword ? 'Changing...' : 'Change Password'}
+        </button>
+      </form>
+    </div>
   )
 }
+
 function App() {
   const [activePage, setActivePage] = useState('Dashboard')
 
@@ -2704,9 +3240,5 @@ function App() {
 }
 
 export default App
-
-
-
-
 
 

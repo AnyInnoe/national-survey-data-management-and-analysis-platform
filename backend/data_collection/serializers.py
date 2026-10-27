@@ -1,6 +1,6 @@
 from rest_framework import serializers
 
-from surveys.models import Survey
+from surveys.models import Questionnaire
 
 from .models import Household, Interview, Respondent
 
@@ -62,6 +62,7 @@ class InterviewSerializer(serializers.ModelSerializer):
         fields = [
             "id",
             "survey",
+            "questionnaire",
             "household",
             "household_id",
             "status",
@@ -70,11 +71,22 @@ class InterviewSerializer(serializers.ModelSerializer):
             "created_at",
             "updated_at",
         ]
-        read_only_fields = ["id", "household_id", "created_at", "updated_at"]
+        read_only_fields = ["id", "questionnaire", "household_id", "created_at", "updated_at"]
 
     def validate(self, attrs):
         household = attrs.get("household", getattr(self.instance, "household", None))
         survey = attrs.get("survey", getattr(self.instance, "survey", None))
         if household and survey and household.survey_id != survey.id:
             raise serializers.ValidationError({"household": "The household must belong to the selected survey."})
+        if not self.instance:
+            questionnaire = Questionnaire.objects.filter(
+                survey=survey, status=Questionnaire.Status.PUBLISHED
+            ).first()
+            if questionnaire is None:
+                raise serializers.ValidationError({"survey": "Publish a questionnaire for this survey before starting an interview."})
+            attrs["questionnaire"] = questionnaire
+        else:
+            questionnaire = attrs.get("questionnaire", self.instance.questionnaire)
+            if questionnaire and survey and questionnaire.survey_id != survey.id:
+                raise serializers.ValidationError({"survey": "The interview questionnaire must belong to the selected survey."})
         return attrs

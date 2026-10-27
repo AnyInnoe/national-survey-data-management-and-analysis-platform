@@ -16,8 +16,13 @@ Including another URLconf
 """
 from django.contrib import admin
 from django.urls import include, path
+from data_collection.views import DataCleaningCorrectionView, DataCleaningView, ValidationIssuesView
 
 urlpatterns = [
     path('admin/', admin.site.urls),
     path("api/", include("surveys.urls")),
+    path("api/", include("reporting.urls")),
+    path("api/validation/issues/", ValidationIssuesView.as_view(), name="validation-issues"),
+    path("api/cleaning/issues/", DataCleaningView.as_view(), name="cleaning-issues"),
+    path("api/cleaning/correct/", DataCleaningCorrectionView.as_view(), name="cleaning-correct"),
 ]
